@@ -1,6 +1,6 @@
 {
   "name": "@99xio/mcp-msgraph",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Lokka is a Model Context Protocol (MCP) server for Microsoft Graph.",
   "license": "MIT",
   "author": "Merill",
