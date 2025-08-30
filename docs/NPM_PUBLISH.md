@@ -125,33 +125,36 @@ npm publish --access public
 ## Version Management Examples
 
 ### Patch Release Example
+
 ```bash
-cd src/mcp
-npm version patch --no-git-tag-version  # 0.3.0 → 0.3.1
+export VERSION=0.3.1
+npm version patch --no-git-tag-version
 git add package.json
-git commit -m "Bump version to v0.3.1"
-git tag "v0.3.1"
-git push origin main && git push origin "v0.3.1"
+git commit -m "Bump version to $VERSION"
+git tag "v$VERSION"
+git push origin main && git push origin "v$VERSION"
 ```
 
 ### Minor Release Example
+
 ```bash
 cd src/mcp
-npm version minor --no-git-tag-version  # 0.3.0 → 0.4.0
+npm version minor --no-git-tag-version
 git add package.json
-git commit -m "Bump version to v0.4.0"
-git tag "v0.4.0"
-git push origin main && git push origin "v0.4.0"
+git commit -m "Bump version to $VERSION"
+git tag "v$VERSION"
+git push origin main && git push origin "v$VERSION"
 ```
 
 ### Major Release Example
+
 ```bash
 cd src/mcp
-npm version major --no-git-tag-version  # 0.3.0 → 1.0.0
+npm version major --no-git-tag-version
 git add package.json
-git commit -m "Bump version to v1.0.0"
-git tag "v1.0.0"
-git push origin main && git push origin "v1.0.0"
+git commit -m "Bump version to $VERSION"
+git tag "v$VERSION"
+git push origin main && git push origin "v$VERSION"
 ```
 
 ## Quick Release Script
