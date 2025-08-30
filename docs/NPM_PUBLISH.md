@@ -2,6 +2,17 @@
 
 This document provides step-by-step instructions for patching and publishing the MCP Microsoft Graph server package to npm.
 
+## Quick Release Script
+
+```bash
+export VERSION=0.3.1
+npm version patch --no-git-tag-version
+git add package.json
+git commit -m "Bump version to $VERSION"
+git tag "v$VERSION"
+git push origin main && git push origin "v$VERSION"
+```
+
 ## Prerequisites
 
 Before you begin, ensure you have:
