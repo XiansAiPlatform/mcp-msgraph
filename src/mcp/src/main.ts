@@ -39,7 +39,7 @@ server.tool(
     apiVersion: z.string().optional().describe("Azure Resource Management API version (required for apiType Azure)"),
     subscriptionId: z.string().optional().describe("Azure Subscription ID (for Azure Resource Management)."),
     queryParams: z.record(z.string()).optional().describe("Query parameters for the request"),
-    body: z.record(z.string(), z.any()).optional().describe("The request body (for POST, PUT, PATCH)"),
+    body: z.union([z.record(z.string(), z.any()), z.string(), z.array(z.any())]).optional().describe("The request body (for POST, PUT, PATCH) - can be an object, string, or array"),
     graphApiVersion: z.enum(["v1.0", "beta"]).optional().default(defaultGraphApiVersion as "v1.0" | "beta").describe(`Microsoft Graph API version to use (default: ${defaultGraphApiVersion})`),
     fetchAll: z.boolean().optional().default(false).describe("Set to true to automatically fetch all pages for list results (e.g., users, groups). Default is false."),
     consistencyLevel: z.string().optional().describe("Graph API ConsistencyLevel header. ADVISED to be set to 'eventual' for Graph GET requests using advanced query parameters ($filter, $count, $search, $orderby)."),

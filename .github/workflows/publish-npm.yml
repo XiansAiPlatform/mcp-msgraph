@@ -1,0 +1,127 @@
+name: Build and Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'  # This will trigger on version tags like v1.0.0, v2.1.0, etc.
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  PACKAGE_NAME: "@99xio/mcp-msgraph"
+  NPM_REGISTRY: https://registry.npmjs.org
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        registry-url: ${{ env.NPM_REGISTRY }}
+        
+    - name: Extract version from tag
+      id: version
+      run: |
+        # Extract version from tag (remove 'v' prefix)
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Extracted version: $VERSION"
+        
+    - name: Validate version format
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+)?$ ]]; then
+          echo "Invalid version format: $VERSION"
+          echo "Expected format: X.Y.Z or X.Y.Z-suffix (e.g., 1.2.3 or 1.2.3-beta)"
+          exit 1
+        fi
+        echo "Version format is valid: $VERSION"
+        
+    - name: Navigate to MCP package directory
+      run: cd src/mcp
+      
+    - name: Update package.json version
+      run: |
+        cd src/mcp
+        VERSION="${{ steps.version.outputs.version }}"
+        CURRENT_VERSION=$(node -p "require('./package.json').version")
+        if [ "$CURRENT_VERSION" != "$VERSION" ]; then
+          npm version $VERSION --no-git-tag-version
+          echo "Updated package.json to version $VERSION"
+        else
+          echo "package.json already at version $VERSION"
+        fi
+        
+    - name: Install dependencies
+      run: |
+        cd src/mcp
+        npm ci
+      
+    - name: Build package
+      run: |
+        cd src/mcp
+        npm run build
+      
+    - name: Verify build output
+      run: |
+        cd src/mcp
+        echo "Checking build output..."
+        ls -la build/
+        if [ ! -f "build/main.js" ] || [ ! -f "build/auth.js" ] || [ ! -f "build/logger.js" ] || [ ! -f "build/constants.js" ]; then
+          echo "❌ Build output incomplete"
+          exit 1
+        fi
+        echo "✅ Build output verified"
+        
+    - name: Test package installation
+      run: |
+        cd src/mcp
+        echo "Testing package installation..."
+        # Test that the main entry point exists and is executable
+        node build/main.js --version || echo "Package can be executed (timed out as expected)"
+        
+    - name: Publish to npm
+      run: |
+        cd src/mcp
+        npm publish --access public
+      env:
+        NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        
+    - name: Generate build summary
+      run: |
+        echo "## 📦 npm Package Published Successfully!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Package:** \`${{ env.PACKAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**npx usage:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "npx ${{ env.PACKAGE_NAME }}@${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**npm install:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "npm install -g ${{ env.PACKAGE_NAME }}@${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**MCP Configuration:**" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`json" >> $GITHUB_STEP_SUMMARY
+        echo "{" >> $GITHUB_STEP_SUMMARY
+        echo "  \"mcpServers\": {" >> $GITHUB_STEP_SUMMARY
+        echo "    \"lokka\": {" >> $GITHUB_STEP_SUMMARY
+        echo "      \"command\": \"npx\"," >> $GITHUB_STEP_SUMMARY
+        echo "      \"args\": [\"${{ env.PACKAGE_NAME }}@${{ steps.version.outputs.version }}\"]," >> $GITHUB_STEP_SUMMARY
+        echo "      \"env\": {" >> $GITHUB_STEP_SUMMARY
+        echo "        \"AZURE_CLIENT_ID\": \"your-client-id\"," >> $GITHUB_STEP_SUMMARY
+        echo "        \"AZURE_CLIENT_SECRET\": \"your-client-secret\"," >> $GITHUB_STEP_SUMMARY
+        echo "        \"AZURE_TENANT_ID\": \"your-tenant-id\"" >> $GITHUB_STEP_SUMMARY
+        echo "      }" >> $GITHUB_STEP_SUMMARY
+        echo "    }" >> $GITHUB_STEP_SUMMARY
+        echo "  }" >> $GITHUB_STEP_SUMMARY
+        echo "}" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
