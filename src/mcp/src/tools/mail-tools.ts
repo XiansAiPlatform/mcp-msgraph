@@ -14,7 +14,35 @@ const zBooleanParam = () => z.union([
 // Helper function to normalize recipient input
 const normalizeRecipients = (recipients: string | Array<{email: string, name?: string}>): Array<{email: string, name?: string}> => {
   if (typeof recipients === 'string') {
-    // Handle comma-separated email addresses
+    // First, try to parse as JSON in case it's a JSON string from Semantic Kernel
+    try {
+      const parsed = JSON.parse(recipients);
+      if (Array.isArray(parsed)) {
+        // If it's an array of strings (email addresses)
+        if (parsed.length > 0 && typeof parsed[0] === 'string') {
+          return parsed.map((email: string) => ({
+            email: email.trim(),
+            name: undefined
+          }));
+        }
+        // If it's an array of objects with email/name properties
+        return parsed.map((recipient: any) => ({
+          email: recipient.email || recipient.address || recipient,
+          name: recipient.name || undefined
+        }));
+      }
+      // If it's a single string after parsing
+      if (typeof parsed === 'string') {
+        return [{
+          email: parsed.trim(),
+          name: undefined
+        }];
+      }
+    } catch (e) {
+      // Not valid JSON, continue with original string processing
+    }
+    
+    // Handle comma-separated email addresses or single email
     return recipients.split(',').map(email => ({
       email: email.trim(),
       name: undefined
