@@ -57,7 +57,7 @@ export function registerMailTools(
 ) {
   server.tool(
     "send-mail",
-    "Send an email using Microsoft Graph API. Can optionally return message ID for adding attachments. Requires Mail.Send permission.",
+    "Send an email using Microsoft Graph API. Always returns message ID for tracking. Requires Mail.Send permission.",
     {
       userEmail: z.string().describe("Email address of the user on whose behalf to send the email (use 'me' for authenticated user)"),
       to: z.union([
@@ -158,27 +158,37 @@ export function registerMailTools(
             }],
           };
         } else {
-          // Send immediately using the sendMail endpoint
-          const requestBody = {
-            message
-          };
+          // Create as draft first to get message ID, then send it
+          logger.info(`Creating and sending email to ${normalizedTo.map(r => r.email).join(', ')} with subject: ${subject} on behalf of ${userEmail}`);
 
-          logger.info(`Sending email to ${normalizedTo.map(r => r.email).join(', ')} with subject: ${subject} on behalf of ${userEmail}`);
-
-          const response = await apiHelper.callGraphApi({
-            path: `/${userPart}/sendMail`,
+          // Step 1: Create the draft message
+          const createResponse = await apiHelper.callGraphApi({
+            path: `/${userPart}/messages`,
             method: 'post',
-            body: requestBody
+            body: message
           });
 
-          if (response.error) {
-            throw new Error(response.error);
+          if (createResponse.error) {
+            throw new Error(createResponse.error);
+          }
+
+          const draftMessage = createResponse.data;
+          const messageId = draftMessage.id;
+
+          // Step 2: Send the draft message
+          const sendResponse = await apiHelper.callGraphApi({
+            path: `/${userPart}/messages/${messageId}/send`,
+            method: 'post'
+          });
+
+          if (sendResponse.error) {
+            throw new Error(sendResponse.error);
           }
 
           return {
             content: [{ 
               type: "text" as const, 
-              text: `Email sent successfully on behalf of ${userEmail}!\n\nSubject: ${subject}\nTo: ${normalizedTo.map(r => r.email).join(', ')}${normalizedCc ? `\nCC: ${normalizedCc.map(r => r.email).join(', ')}` : ''}${normalizedBcc ? `\nBCC: ${normalizedBcc.map(r => r.email).join(', ')}` : ''}` 
+              text: `Email sent successfully on behalf of ${userEmail}!\n\nEmail Details:\n- Message ID: ${messageId}\n- Subject: ${subject}\n- To: ${normalizedTo.map(r => r.email).join(', ')}${normalizedCc ? `\n- CC: ${normalizedCc.map(r => r.email).join(', ')}` : ''}${normalizedBcc ? `\n- BCC: ${normalizedBcc.map(r => r.email).join(', ')}` : ''}` 
             }],
           };
         }
@@ -403,7 +413,7 @@ export function registerMailTools(
 
   server.tool(
     "send-mail-with-attachments",
-    "Send an email with file attachments in a single operation. Only requires Mail.Send permission (no Mail.ReadWrite needed).",
+    "Send an email with file attachments in a single operation. Returns message ID for tracking. Only requires Mail.Send permission (no Mail.ReadWrite needed).",
     {
       userEmail: z.string().describe("Email address of the user on whose behalf to send the email (use 'me' for authenticated user)"),
       to: z.union([
@@ -562,18 +572,31 @@ export function registerMailTools(
         }
 
         const userPart = userEmail === 'me' ? 'me' : `users/${userEmail}`;
-        const requestBody = { message };
 
-        logger.info(`Sending email with ${normalizedAttachments.length} attachment(s) to ${normalizedTo.map(r => r.email).join(', ')} with subject: ${subject} on behalf of ${userEmail}`);
+        logger.info(`Creating and sending email with ${normalizedAttachments.length} attachment(s) to ${normalizedTo.map(r => r.email).join(', ')} with subject: ${subject} on behalf of ${userEmail}`);
 
-        const response = await apiHelper.callGraphApi({
-          path: `/${userPart}/sendMail`,
+        // Step 1: Create the draft message with attachments
+        const createResponse = await apiHelper.callGraphApi({
+          path: `/${userPart}/messages`,
           method: 'post',
-          body: requestBody
+          body: message
         });
 
-        if (response.error) {
-          throw new Error(response.error);
+        if (createResponse.error) {
+          throw new Error(createResponse.error);
+        }
+
+        const draftMessage = createResponse.data;
+        const messageId = draftMessage.id;
+
+        // Step 2: Send the draft message
+        const sendResponse = await apiHelper.callGraphApi({
+          path: `/${userPart}/messages/${messageId}/send`,
+          method: 'post'
+        });
+
+        if (sendResponse.error) {
+          throw new Error(sendResponse.error);
         }
 
         const attachmentSummary = normalizedAttachments.map((att, idx) => 
@@ -583,7 +606,7 @@ export function registerMailTools(
         return {
           content: [{ 
             type: "text" as const, 
-            text: `Email with attachments sent successfully!\n\nEmail Details:\n- Subject: ${subject}\n- To: ${normalizedTo.map(r => r.email).join(', ')}${normalizedCc ? `\n- CC: ${normalizedCc.map(r => r.email).join(', ')}` : ''}${normalizedBcc ? `\n- BCC: ${normalizedBcc.map(r => r.email).join(', ')}` : ''}\n- User: ${userEmail}\n\nAttachments (${normalizedAttachments.length}):\n${attachmentSummary}` 
+            text: `Email with attachments sent successfully!\n\nEmail Details:\n- Message ID: ${messageId}\n- Subject: ${subject}\n- To: ${normalizedTo.map(r => r.email).join(', ')}${normalizedCc ? `\n- CC: ${normalizedCc.map(r => r.email).join(', ')}` : ''}${normalizedBcc ? `\n- BCC: ${normalizedBcc.map(r => r.email).join(', ')}` : ''}\n- User: ${userEmail}\n\nAttachments (${normalizedAttachments.length}):\n${attachmentSummary}` 
           }],
         };
 
@@ -601,6 +624,574 @@ export function registerMailTools(
           content: [{ 
             type: "text" as const, 
             text: `Error sending email with attachments: ${errorMessage}` 
+          }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "check-message-responses",
+    "Check for responses(replies) to a specific message using the In-Reply-To email header. This provides accurate message threading by reading the InternetMessageId of the original message and finding messages with matching In-Reply-To headers. Requires Mail.Read permission.",
+    {
+      userEmail: z.string().describe("Email address of the user whose mailbox to search"),
+      originalMessageId: z.string().describe("ID of the original message to check responses for"),
+      useInternetHeaders: zBooleanParam().optional().default(false).describe("If true, uses InternetHeaders (slower but more comprehensive). If false, uses extended properties (faster, In-Reply-To only)"),
+      searchDays: z.union([z.number(), z.string().transform(str => parseInt(str, 10))]).optional().default(30).describe("Number of days to search back from today (default: 30)"),
+      maxResults: z.union([z.number(), z.string().transform(str => parseInt(str, 10))]).optional().default(100).describe("Maximum number of messages to analyze (default: 100)")
+    },
+    async ({ userEmail, originalMessageId, useInternetHeaders, searchDays, maxResults }) => {
+      try {
+        const apiHelper = getApiHelper();
+        if (!apiHelper) {
+          throw new Error("API helper not initialized");
+        }
+
+        // First, get the original message to extract its InternetMessageId
+        logger.info(`Getting original message ${originalMessageId} for ${userEmail}`);
+        
+        const originalMessageResponse = await apiHelper.callGraphApi({
+          path: `/users/${userEmail}/messages/${originalMessageId}`,
+          method: 'get',
+          queryParams: {
+            '$select': 'id,subject,sentDateTime,from,toRecipients,ccRecipients,internetMessageId'
+          }
+        });
+
+        if (originalMessageResponse.error) {
+          throw new Error(`Failed to get original message: ${originalMessageResponse.error}`);
+        }
+
+        const originalMessage = originalMessageResponse.data;
+        const originalInternetMessageId = originalMessage.internetMessageId;
+        
+        if (!originalInternetMessageId) {
+          throw new Error("Original message does not have an InternetMessageId. Cannot search for responses.");
+        }
+
+        const originalSubject = originalMessage.subject || '';
+        const originalSender = originalMessage.from?.emailAddress?.address;
+        const originalSentDate = new Date(originalMessage.sentDateTime);
+
+        // Calculate search date range (from original message date to searchDays from now)
+        const searchStartDate = originalSentDate.toISOString();
+        const searchEndDate = new Date(Date.now() + (searchDays * 24 * 60 * 60 * 1000)).toISOString();
+
+        logger.info(`Searching for responses to message with InternetMessageId: "${originalInternetMessageId}"`);
+
+        let responses: any[] = [];
+
+        if (useInternetHeaders) {
+          // Method 1: Use InternetHeaders (comprehensive but slower)
+          logger.info("Using InternetHeaders method for comprehensive header analysis");
+          
+          const queryParams: Record<string, string> = {
+            '$filter': `receivedDateTime ge ${searchStartDate} and receivedDateTime le ${searchEndDate}`,
+            '$orderby': 'receivedDateTime desc',
+            '$top': String(Math.min(maxResults, 999)),
+            '$select': 'id,subject,from,receivedDateTime,toRecipients,ccRecipients,body',
+            '$expand': 'internetMessageHeaders'
+          };
+
+          const searchResponse = await apiHelper.callGraphApi({
+            path: `/users/${userEmail}/messages`,
+            method: 'get',
+            queryParams
+          });
+
+          if (searchResponse.error) {
+            throw new Error(searchResponse.error);
+          }
+
+          const allMessages = searchResponse.data.value || [];
+          
+          // Filter messages that have In-Reply-To header matching our InternetMessageId
+          responses = allMessages.filter((msg: any) => {
+            if (msg.id === originalMessageId) return false; // Skip original message
+            
+            const headers = msg.internetMessageHeaders || [];
+            const inReplyToHeader = headers.find((h: any) => 
+              h.name.toLowerCase() === 'in-reply-to'
+            );
+            
+            return inReplyToHeader && inReplyToHeader.value.includes(originalInternetMessageId);
+          });
+
+        } else {
+          // Method 2: Use Extended Properties (faster, In-Reply-To only)
+          logger.info("Using Extended Properties method for In-Reply-To header");
+          
+          // Extended property ID for In-Reply-To header (String 0x1042)
+          const inReplyToPropertyId = 'String 0x1042';
+          
+          const queryParams: Record<string, string> = {
+            '$filter': `receivedDateTime ge ${searchStartDate} and receivedDateTime le ${searchEndDate}`,
+            '$orderby': 'receivedDateTime desc',
+            '$top': String(Math.min(maxResults, 999)),
+            '$select': 'id,subject,from,receivedDateTime,toRecipients,ccRecipients,body',
+            '$expand': `singleValueExtendedProperties($filter=id eq '${inReplyToPropertyId}')`
+          };
+
+          const searchResponse = await apiHelper.callGraphApi({
+            path: `/users/${userEmail}/messages`,
+            method: 'get',
+            queryParams
+          });
+
+          if (searchResponse.error) {
+            throw new Error(searchResponse.error);
+          }
+
+          const allMessages = searchResponse.data.value || [];
+          
+          // Filter messages that have In-Reply-To extended property matching our InternetMessageId
+          responses = allMessages.filter((msg: any) => {
+            if (msg.id === originalMessageId) return false; // Skip original message
+            
+            const extendedProps = msg.singleValueExtendedProperties || [];
+            const inReplyToProp = extendedProps.find((prop: any) => 
+              prop.id === inReplyToPropertyId
+            );
+            
+            return inReplyToProp && inReplyToProp.value && inReplyToProp.value.includes(originalInternetMessageId);
+          });
+        }
+
+        // Sort by received date (most recent first)
+        responses.sort((a: any, b: any) => 
+          new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
+        );
+
+        if (responses.length === 0) {
+          return {
+            content: [{ 
+              type: "text" as const, 
+              text: `No responses found to the message.\n\nOriginal message details:\n- Message ID: ${originalMessageId}\n- InternetMessageId: ${originalInternetMessageId}\n- Subject: ${originalSubject}\n- Sent: ${originalSentDate.toLocaleString()}\n- From: ${originalMessage.from?.emailAddress?.name || ''} <${originalSender || 'Unknown'}>\n\nMethod used: ${useInternetHeaders ? 'InternetHeaders' : 'Extended Properties (In-Reply-To)'}\nSearch period: ${searchDays} days from message date` 
+            }],
+          };
+        }
+
+        // Format the responses
+        let responseText = `Found ${responses.length} response(s) to the message using In-Reply-To header matching:\n\n`;
+        responseText += `Original message:\n- ID: ${originalMessageId}\n- InternetMessageId: ${originalInternetMessageId}\n- Subject: ${originalSubject}\n- Sent: ${originalSentDate.toLocaleString()}\n- From: ${originalMessage.from?.emailAddress?.name || ''} <${originalSender || 'Unknown'}>\n\n`;
+        responseText += `Responses (${useInternetHeaders ? 'via InternetHeaders' : 'via Extended Properties'}):\n`;
+
+        responses.forEach((msg: any, index: number) => {
+          const from = msg.from?.emailAddress?.address || 'Unknown';
+          const fromName = msg.from?.emailAddress?.name || '';
+          const subject = msg.subject || '(No subject)';
+          const received = new Date(msg.receivedDateTime).toLocaleString();
+          
+          responseText += `${index + 1}. From: ${fromName} <${from}>\n`;
+          responseText += `   Subject: ${subject}\n`;
+          responseText += `   Received: ${received}\n`;
+          responseText += `   Message ID: ${msg.id}\n`;
+          responseText += `   Body: ${msg.body.content}\n`;
+          
+          responseText += '\n';
+        });
+
+        return {
+          content: [{ 
+            type: "text" as const, 
+            text: responseText
+          }],
+        };
+
+      } catch (error: any) {
+        logger.error("Error checking message responses:", error);
+        const errorMessage = error.statusCode === 403 
+          ? "Permission denied. Ensure the Mail.Read permission is granted to the application."
+          : error.statusCode === 404 
+          ? "Original message not found. The message ID may be invalid or the message may have been deleted."
+          : error.message;
+        return {
+          content: [{ 
+            type: "text" as const, 
+            text: `Error checking message responses: ${errorMessage}` 
+          }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "get-message-thread",
+    "Build a complete message thread/conversation chain starting from a message. Uses In-Reply-To and References headers to build the full conversation tree. Requires Mail.Read permission.",
+    {
+      userEmail: z.string().describe("Email address of the user whose mailbox to search"),
+      messageId: z.string().describe("ID of any message in the thread (can be original message or any reply)"),
+      maxDepth: z.union([z.number(), z.string().transform(str => parseInt(str, 10))]).optional().default(10).describe("Maximum depth to traverse the thread (default: 10)"),
+      includeBody: zBooleanParam().optional().default(false).describe("Whether to include message body content in the thread")
+    },
+    async ({ userEmail, messageId, maxDepth, includeBody }) => {
+      try {
+        const apiHelper = getApiHelper();
+        if (!apiHelper) {
+          throw new Error("API helper not initialized");
+        }
+
+        logger.info(`Building message thread for message ${messageId} for ${userEmail}`);
+
+        // First, get the starting message
+        const startingMessageResponse = await apiHelper.callGraphApi({
+          path: `/users/${userEmail}/messages/${messageId}`,
+          method: 'get',
+          queryParams: {
+            '$select': 'id,subject,sentDateTime,receivedDateTime,from,toRecipients,ccRecipients,internetMessageId,body',
+            '$expand': 'internetMessageHeaders'
+          }
+        });
+
+        if (startingMessageResponse.error) {
+          throw new Error(`Failed to get starting message: ${startingMessageResponse.error}`);
+        }
+
+        const startingMessage = startingMessageResponse.data;
+        const messageMap = new Map<string, any>();
+        const threadMessages: any[] = [];
+        
+        // Add starting message to our collections
+        messageMap.set(startingMessage.id, startingMessage);
+        threadMessages.push(startingMessage);
+
+        // Extract References header to find the root message
+        const headers = startingMessage.internetMessageHeaders || [];
+        const referencesHeader = headers.find((h: any) => h.name.toLowerCase() === 'references');
+        const inReplyToHeader = headers.find((h: any) => h.name.toLowerCase() === 'in-reply-to');
+        
+        let rootInternetMessageId = startingMessage.internetMessageId;
+        
+        // If this message is a reply, find the root message
+        if (referencesHeader && referencesHeader.value) {
+          // References header contains all previous message IDs in the thread
+          const references = referencesHeader.value.match(/<[^>]+>/g) || [];
+          if (references.length > 0) {
+            rootInternetMessageId = references[0].replace(/[<>]/g, ''); // First reference is usually the root
+          }
+        } else if (inReplyToHeader && inReplyToHeader.value) {
+          // If no References, use In-Reply-To as potential root
+          const inReplyTo = inReplyToHeader.value.match(/<[^>]+>/);
+          if (inReplyTo) {
+            rootInternetMessageId = inReplyTo[0].replace(/[<>]/g, '');
+          }
+        }
+
+        // Search for all messages in the thread using extended properties
+        const inReplyToPropertyId = 'String 0x1042'; // In-Reply-To header
+        const referencesPropertyId = 'String 0x1040'; // References header
+
+        // Search for messages that reference our root message or starting message
+        const searchIds = [rootInternetMessageId, startingMessage.internetMessageId].filter(id => id);
+        const allThreadMessages = new Set<string>();
+
+        for (const searchId of searchIds) {
+          // Search using extended properties for In-Reply-To
+          const queryParams: Record<string, string> = {
+            '$orderby': 'sentDateTime asc',
+            '$top': '999',
+            '$select': includeBody ? 
+              'id,subject,sentDateTime,receivedDateTime,from,toRecipients,ccRecipients,internetMessageId,body' :
+              'id,subject,sentDateTime,receivedDateTime,from,toRecipients,ccRecipients,internetMessageId',
+            '$expand': `internetMessageHeaders,singleValueExtendedProperties($filter=id eq '${inReplyToPropertyId}' or id eq '${referencesPropertyId}')`
+          };
+
+          const searchResponse = await apiHelper.callGraphApi({
+            path: `/users/${userEmail}/messages`,
+            method: 'get',
+            queryParams
+          });
+
+          if (searchResponse.error) {
+            logger.error(`Error searching for thread messages: ${searchResponse.error}`);
+            continue;
+          }
+
+          const messages = searchResponse.data.value || [];
+          
+          // Filter messages that are part of this thread
+          for (const msg of messages) {
+            const msgHeaders = msg.internetMessageHeaders || [];
+            const msgInReplyTo = msgHeaders.find((h: any) => h.name.toLowerCase() === 'in-reply-to');
+            const msgReferences = msgHeaders.find((h: any) => h.name.toLowerCase() === 'references');
+            
+            // Check if this message references our search ID
+            const isInThread = 
+              (msgInReplyTo && msgInReplyTo.value.includes(searchId)) ||
+              (msgReferences && msgReferences.value.includes(searchId)) ||
+              msg.internetMessageId === searchId;
+
+            if (isInThread && !messageMap.has(msg.id)) {
+              messageMap.set(msg.id, msg);
+              threadMessages.push(msg);
+              allThreadMessages.add(msg.internetMessageId);
+            }
+          }
+        }
+
+        // Sort all messages by sent date
+        threadMessages.sort((a, b) => 
+          new Date(a.sentDateTime || a.receivedDateTime).getTime() - 
+          new Date(b.sentDateTime || b.receivedDateTime).getTime()
+        );
+
+        // Build the thread structure
+        const threadStructure: any[] = [];
+        const processedIds = new Set<string>();
+
+        for (const msg of threadMessages) {
+          if (processedIds.has(msg.id)) continue;
+          
+          const headers = msg.internetMessageHeaders || [];
+          const inReplyTo = headers.find((h: any) => h.name.toLowerCase() === 'in-reply-to');
+          
+          const threadItem = {
+            id: msg.id,
+            internetMessageId: msg.internetMessageId,
+            subject: msg.subject || '(No subject)',
+            from: {
+              name: msg.from?.emailAddress?.name || '',
+              address: msg.from?.emailAddress?.address || 'Unknown'
+            },
+            sentDateTime: msg.sentDateTime || msg.receivedDateTime,
+            inReplyTo: inReplyTo ? inReplyTo.value.replace(/[<>]/g, '') : null,
+            body: includeBody && msg.body ? 
+              msg.body.content?.replace(/<[^>]*>/g, '').substring(0, 300) + 
+              (msg.body.content?.length > 300 ? '...' : '') : null,
+            isStartingMessage: msg.id === messageId
+          };
+          
+          threadStructure.push(threadItem);
+          processedIds.add(msg.id);
+        }
+
+        if (threadStructure.length === 0) {
+          return {
+            content: [{ 
+              type: "text" as const, 
+              text: `No thread found for message ${messageId}. This might be a standalone message with no replies or references.` 
+            }],
+          };
+        }
+
+        // Format the thread for display
+        let threadText = `Message Thread (${threadStructure.length} message${threadStructure.length === 1 ? '' : 's'}):\n\n`;
+        
+        threadStructure.forEach((msg, index) => {
+          const sentDate = new Date(msg.sentDateTime).toLocaleString();
+          const marker = msg.isStartingMessage ? ' ← STARTING MESSAGE' : '';
+          const replyIndicator = msg.inReplyTo ? '↳ ' : '';
+          
+          threadText += `${replyIndicator}${index + 1}. ${msg.from.name} <${msg.from.address}>${marker}\n`;
+          threadText += `   Subject: ${msg.subject}\n`;
+          threadText += `   Sent: ${sentDate}\n`;
+          threadText += `   Message ID: ${msg.id}\n`;
+          if (msg.inReplyTo) {
+            threadText += `   In-Reply-To: ${msg.inReplyTo}\n`;
+          }
+          if (msg.body) {
+            threadText += `   Body: ${msg.body}\n`;
+          }
+          threadText += '\n';
+        });
+
+        threadText += `Thread Analysis:\n`;
+        threadText += `- Root message: ${threadStructure[0]?.subject || 'Unknown'}\n`;
+        threadText += `- Total messages: ${threadStructure.length}\n`;
+        threadText += `- Date range: ${new Date(threadStructure[0]?.sentDateTime).toLocaleDateString()} - ${new Date(threadStructure[threadStructure.length - 1]?.sentDateTime).toLocaleDateString()}\n`;
+
+        return {
+          content: [{ 
+            type: "text" as const, 
+            text: threadText
+          }],
+        };
+
+      } catch (error: any) {
+        logger.error("Error building message thread:", error);
+        const errorMessage = error.statusCode === 403 
+          ? "Permission denied. Ensure the Mail.Read permission is granted to the application."
+          : error.statusCode === 404 
+          ? "Message not found. The message ID may be invalid or the message may have been deleted."
+          : error.message;
+        return {
+          content: [{ 
+            type: "text" as const, 
+            text: `Error building message thread: ${errorMessage}` 
+          }],
+          isError: true
+        };
+      }
+    }
+  );
+
+  server.tool(
+    "debug-message-access",
+    "Debug tool to troubleshoot message access issues. Helps identify why a message ID might not be found. Requires Mail.Read permission.",
+    {
+      userEmail: z.string().describe("Email address of the user whose mailbox to search"),
+      messageId: z.string().describe("ID of the message to debug"),
+      searchAllFolders: zBooleanParam().optional().default(false).describe("If true, searches all mail folders for the message")
+    },
+    async ({ userEmail, messageId, searchAllFolders }) => {
+      try {
+        const apiHelper = getApiHelper();
+        if (!apiHelper) {
+          throw new Error("API helper not initialized");
+        }
+
+        logger.info(`Debugging message access for ${messageId} in ${userEmail}'s mailbox`);
+
+        let debugInfo = `Debug Report for Message ID: ${messageId}\nUser: ${userEmail}\n\n`;
+
+        // Step 1: Try to get the message directly
+        debugInfo += "Step 1: Direct message access attempt\n";
+        const directResponse = await apiHelper.callGraphApi({
+          path: `/users/${userEmail}/messages/${messageId}`,
+          method: 'get',
+          queryParams: {
+            '$select': 'id,subject,sentDateTime,receivedDateTime,from,parentFolderId,internetMessageId'
+          }
+        });
+
+        if (directResponse.error) {
+          debugInfo += `❌ Direct access failed: ${directResponse.error}\n\n`;
+          
+          if (searchAllFolders) {
+            // Step 2: Search in different folders
+            debugInfo += "Step 2: Searching in different mail folders\n";
+            const wellKnownFolders = ['inbox', 'sentitems', 'drafts', 'deleteditems', 'junkemail', 'outbox'];
+            
+            for (const folder of wellKnownFolders) {
+              try {
+                const folderResponse = await apiHelper.callGraphApi({
+                  path: `/users/${userEmail}/mailFolders/${folder}/messages/${messageId}`,
+                  method: 'get',
+                  queryParams: {
+                    '$select': 'id,subject,sentDateTime,receivedDateTime,from,parentFolderId'
+                  }
+                });
+
+                if (!folderResponse.error) {
+                  debugInfo += `✅ Found in folder: ${folder}\n`;
+                  const msg = folderResponse.data;
+                  debugInfo += `   Subject: ${msg.subject || '(No subject)'}\n`;
+                  debugInfo += `   From: ${msg.from?.emailAddress?.address || 'Unknown'}\n`;
+                  debugInfo += `   Sent: ${msg.sentDateTime || msg.receivedDateTime || 'Unknown'}\n`;
+                  debugInfo += `   Parent Folder ID: ${msg.parentFolderId}\n\n`;
+                  break;
+                } else {
+                  debugInfo += `❌ Not in ${folder}: ${folderResponse.error}\n`;
+                }
+              } catch (e) {
+                debugInfo += `❌ Error checking ${folder}: ${e}\n`;
+              }
+            }
+
+            // Step 3: Search by partial message ID match
+            debugInfo += "\nStep 3: Searching recent messages for partial ID match\n";
+            try {
+              const recentResponse = await apiHelper.callGraphApi({
+                path: `/users/${userEmail}/messages`,
+                method: 'get',
+                queryParams: {
+                  '$top': '50',
+                  '$orderby': 'receivedDateTime desc',
+                  '$select': 'id,subject,sentDateTime,receivedDateTime,from'
+                }
+              });
+
+              if (!recentResponse.error) {
+                const messages = recentResponse.data.value || [];
+                const partialMatches = messages.filter((msg: any) => 
+                  msg.id.includes(messageId.substring(0, 20)) || 
+                  messageId.includes(msg.id.substring(0, 20))
+                );
+
+                if (partialMatches.length > 0) {
+                  debugInfo += `Found ${partialMatches.length} partial match(es):\n`;
+                  partialMatches.forEach((msg: any, index: number) => {
+                    debugInfo += `  ${index + 1}. ID: ${msg.id}\n`;
+                    debugInfo += `     Subject: ${msg.subject || '(No subject)'}\n`;
+                    debugInfo += `     From: ${msg.from?.emailAddress?.address || 'Unknown'}\n`;
+                    debugInfo += `     Date: ${msg.sentDateTime || msg.receivedDateTime || 'Unknown'}\n\n`;
+                  });
+                } else {
+                  debugInfo += "No partial matches found in recent messages\n\n";
+                }
+              }
+            } catch (e) {
+              debugInfo += `Error searching recent messages: ${e}\n\n`;
+            }
+          }
+        } else {
+          debugInfo += "✅ Direct access successful!\n";
+          const msg = directResponse.data;
+          debugInfo += `   Subject: ${msg.subject || '(No subject)'}\n`;
+          debugInfo += `   From: ${msg.from?.emailAddress?.address || 'Unknown'}\n`;
+          debugInfo += `   Sent: ${msg.sentDateTime || msg.receivedDateTime || 'Unknown'}\n`;
+          debugInfo += `   Parent Folder ID: ${msg.parentFolderId}\n`;
+          debugInfo += `   InternetMessageId: ${msg.internetMessageId || 'Not available'}\n\n`;
+        }
+
+        // Step 4: Check user permissions and mailbox access
+        debugInfo += "Step 4: User mailbox access verification\n";
+        try {
+          const userResponse = await apiHelper.callGraphApi({
+            path: `/users/${userEmail}`,
+            method: 'get',
+            queryParams: {
+              '$select': 'id,displayName,mail,userPrincipalName'
+            }
+          });
+
+          if (!userResponse.error) {
+            debugInfo += "✅ User exists and is accessible\n";
+            debugInfo += `   Display Name: ${userResponse.data.displayName}\n`;
+            debugInfo += `   Mail: ${userResponse.data.mail}\n`;
+            debugInfo += `   UPN: ${userResponse.data.userPrincipalName}\n\n`;
+          } else {
+            debugInfo += `❌ User access issue: ${userResponse.error}\n\n`;
+          }
+        } catch (e) {
+          debugInfo += `❌ Error checking user: ${e}\n\n`;
+        }
+
+        // Step 5: Recommendations
+        debugInfo += "Recommendations:\n";
+        if (directResponse.error) {
+          if (directResponse.error.includes('404') || directResponse.error.includes('NotFound')) {
+            debugInfo += "• Message not found - it may have been deleted, moved, or the ID is incorrect\n";
+            debugInfo += "• Try using the search functionality to find the message by subject or sender\n";
+            if (!searchAllFolders) {
+              debugInfo += "• Run this debug tool again with searchAllFolders=true to check other folders\n";
+            }
+          } else if (directResponse.error.includes('403') || directResponse.error.includes('Forbidden')) {
+            debugInfo += "• Permission issue - ensure the application has Mail.Read permission\n";
+            debugInfo += "• Check if the user has granted consent for the application\n";
+          } else {
+            debugInfo += `• Unexpected error: ${directResponse.error}\n`;
+            debugInfo += "• Try using a different message ID or check the API endpoint\n";
+          }
+        } else {
+          debugInfo += "• Message is accessible - the check-message-responses tool should work\n";
+        }
+
+        return {
+          content: [{ 
+            type: "text" as const, 
+            text: debugInfo
+          }],
+        };
+
+      } catch (error: any) {
+        logger.error("Error in debug tool:", error);
+        return {
+          content: [{ 
+            type: "text" as const, 
+            text: `Debug tool error: ${error.message}` 
           }],
           isError: true
         };
